@@ -42,7 +42,7 @@ def get_config():
 
     # attack-related parameters
     config.attack = 'gcg'
-    config.control_init = " [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ]"
+    config.control_init = "! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !"
     config.n_steps = 500
     config.test_steps = 50
     config.batch_size = 512 # original:512
@@ -56,6 +56,7 @@ def get_config():
     return config
 
 # several init prompt we can try
+#! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
 # [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ]
 # [INST] [INST] [INST] [INST] [INST] [INST] [INST]
 
@@ -63,6 +64,8 @@ def get_config():
 #{\\resizeproto extens=\"<?tikzpicture ( this (>)FP] desktopINST (]$,FP),\\webpackWebachiv
 
 # some prompts need to test
+#
+
 
 
 

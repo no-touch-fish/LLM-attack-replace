@@ -86,6 +86,7 @@ class AttackPrompt(object):
     
     def __init__(self,
         goal,
+        input_target,
         target,
         tokenizer,
         conv_template,
@@ -113,6 +114,7 @@ class AttackPrompt(object):
         """
         
         self.goal = goal
+        self.input_target = input_target
         self.target = target
         self.control = control_init
         self.tokenizer = tokenizer
@@ -128,11 +130,14 @@ class AttackPrompt(object):
         self._update_ids()
 
     def _update_ids(self):
+        print('conv template is:',self.conv_template)
+        separator = ' ' if self.goal else ''
+        ignore_string = '{\\resizeproto extens=\"<?tikzpicture ( this (>)FP] desktopINST (]$,FP),\\webpackWebachiv'
         # roles[0] is [INST] and roles[1] is [/INST]
-        self.conv_template.append_message(self.conv_template.roles[0], f"{self.goal} {self.control}")
+        self.conv_template.append_message(self.conv_template.roles[0], f"{self.goal}{separator}{self.control}{separator}{self.input_target}{separator}{ignore_string}")
         self.conv_template.append_message(self.conv_template.roles[1], f"{self.target}")
         prompt = self.conv_template.get_prompt()
-        # print(prompt)
+        # print('prompt is:',prompt)
         encoding = self.tokenizer(prompt)
         toks = encoding.input_ids
         # print(toks)
@@ -155,16 +160,21 @@ class AttackPrompt(object):
             self._goal_slice = slice(self._user_role_slice.stop, max(self._user_role_slice.stop, len(toks)-1))
             # print('goal is: \"{}\"'.format(self.tokenizer.decode(encoding.input_ids[self._goal_slice])))
 
-            separator = ' ' if self.goal else ''
             self.conv_template.update_last_message(f"{self.goal}{separator}{self.control}")
             toks = self.tokenizer(self.conv_template.get_prompt()).input_ids
             # print('feedback for control is:',self.conv_template.get_prompt())
             self._control_slice = slice(self._goal_slice.stop, len(toks)-1)
             # print('control is: \"{}\"'.format(self.tokenizer.decode(encoding.input_ids[self._control_slice])))
 
+            self.conv_template.update_last_message(f"{self.goal}{separator}{self.control}{separator}{self.input_target}{separator}{ignore_string}")
+            toks = self.tokenizer(self.conv_template.get_prompt()).input_ids
+            # print('feedback for input target is:',self.conv_template.get_prompt())
+            self._input_target_slice = slice(self._control_slice.stop, len(toks)-1)
+            # print('input target is: \"{}\"'.format(self.tokenizer.decode(encoding.input_ids[self._input_target_slice])))
+
             self.conv_template.append_message(self.conv_template.roles[1], None)
             toks = self.tokenizer(self.conv_template.get_prompt()).input_ids
-            self._assistant_role_slice = slice(self._control_slice.stop, len(toks))
+            self._assistant_role_slice = slice(self._input_target_slice.stop, len(toks))
             # print('assistant_role is: \"{}\"'.format(self.tokenizer.decode(encoding.input_ids[self._assistant_role_slice])))
 
             self.conv_template.update_last_message(f"{self.target}")
@@ -240,17 +250,17 @@ class AttackPrompt(object):
 
         self.input_ids = torch.tensor(toks[:self._target_slice.stop], device='cpu')
         prompt = self.conv_template.get_prompt()
-        # print(prompt)
+        print(prompt)
         self.conv_template.messages = []
 
     @torch.no_grad()
     def generate(self, model, gen_config=None):
         if gen_config is None:
             gen_config = model.generation_config
-            gen_config.max_new_tokens = 32
+            gen_config.max_new_tokens = 16
         # print('max_new_tokens is:')
         # print(gen_config.max_new_tokens)
-        gen_config.max_new_tokens = 32
+        gen_config.max_new_tokens = 16
         # if gen_config.max_new_tokens > 32:
         #     print('WARNING: max_new_tokens > 32 may cause testing to slow down.')
         input_ids = self.input_ids[:self._assistant_role_slice.stop].to(model.device).unsqueeze(0)
@@ -387,7 +397,10 @@ class AttackPrompt(object):
 
     @property
     def goal_str(self):
-        return self.tokenizer.decode(self.input_ids[self._goal_slice]).strip()
+        start = self._goal_slice.start
+        end = self._input_target_slice.start
+        combine_slice = slice(start,end)
+        return self.tokenizer.decode(self.input_ids[combine_slice]).strip()
 
     @goal_str.setter
     def goal_str(self, goal):
@@ -396,7 +409,10 @@ class AttackPrompt(object):
     
     @property
     def goal_toks(self):
-        return self.input_ids[self._goal_slice]
+        start = self._goal_slice.start
+        end = self._input_target_slice.start
+        combine_slice = slice(start,end)
+        return self.input_ids[combine_slice]
     
     @property
     def target_str(self):
@@ -431,7 +447,7 @@ class AttackPrompt(object):
     
     @property
     def prompt(self):
-        return self.tokenizer.decode(self.input_ids[self._goal_slice.start:self._control_slice.stop])
+        return self.tokenizer.decode(self.input_ids[self._goal_slice.start:self._input_target_slice.stop])
     
     @property
     def input_toks(self):
@@ -450,6 +466,7 @@ class PromptManager(object):
     """A class used to manage the prompt during optimization."""
     def __init__(self,
         goals,
+        input_targets,
         targets,
         tokenizer,
         conv_template,
@@ -489,13 +506,14 @@ class PromptManager(object):
         self._prompts = [
             managers['AP'](
                 goal, 
+                input_target,
                 target, 
                 tokenizer, 
                 conv_template, 
                 control_init,
                 test_prefixes
             )
-            for goal, target in zip(goals, targets)
+            for goal, input_target, target in zip(goals, input_targets, targets)
         ]
 
         self._nonascii_toks = get_nonascii_toks(tokenizer, device='cpu')
@@ -588,6 +606,7 @@ class MultiPromptAttack(object):
     """A class used to manage multiple prompt-based attacks."""
     def __init__(self, 
         goals, 
+        input_targets,
         targets,
         workers,
         control_init="! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !",
@@ -595,6 +614,7 @@ class MultiPromptAttack(object):
         logfile=None,
         managers=None,
         test_goals=[],
+        test_input_targets=[],
         test_targets=[],
         test_workers=[],
         *args, **kwargs
@@ -627,9 +647,11 @@ class MultiPromptAttack(object):
         """
 
         self.goals = goals
+        self.input_targets = input_targets
         self.targets = targets
         self.workers = workers
         self.test_goals = test_goals
+        self.test_input_targets = test_input_targets
         self.test_targets = test_targets
         self.test_workers = test_workers
         self.test_prefixes = test_prefixes
@@ -638,6 +660,7 @@ class MultiPromptAttack(object):
         self.prompts = [
             managers['PM'](
                 goals,
+                input_targets,
                 targets,
                 worker.tokenizer,
                 worker.conv_template,
@@ -801,6 +824,7 @@ class MultiPromptAttack(object):
         all_prompts = [
             self.managers['PM'](
                 self.goals + self.test_goals,
+                self.input_targets + self.test_input_targets,
                 self.targets + self.test_targets,
                 worker.tokenizer,
                 worker.conv_template,
@@ -875,6 +899,7 @@ class ProgressiveMultiPromptAttack(object):
     """A class used to manage multiple progressive prompt-based attacks."""
     def __init__(self, 
         goals, 
+        input_targets,
         targets,
         workers,
         progressive_goals=True,
@@ -884,6 +909,7 @@ class ProgressiveMultiPromptAttack(object):
         logfile=None,
         managers=None,
         test_goals=[],
+        test_input_targets = [],
         test_targets=[],
         test_workers=[],
         *args, **kwargs
@@ -921,9 +947,11 @@ class ProgressiveMultiPromptAttack(object):
         """
 
         self.goals = goals
+        self.input_targets = input_targets
         self.targets = targets
         self.workers = workers
         self.test_goals = test_goals
+        self.test_input_targets = test_input_targets
         self.test_targets = test_targets
         self.test_workers = test_workers
         self.progressive_goals = progressive_goals
@@ -939,8 +967,10 @@ class ProgressiveMultiPromptAttack(object):
                 json.dump({
                         'params': {
                             'goals': goals,
+                            'input_targets':input_targets,
                             'targets': targets,
                             'test_goals': test_goals,
+                            'test_input_targets':test_input_targets,
                             'test_targets': test_targets,
                             'progressive_goals': progressive_goals,
                             'progressive_models': progressive_models,
@@ -1055,6 +1085,7 @@ class ProgressiveMultiPromptAttack(object):
         while step < n_steps:
             attack = self.managers['MPA'](
                 self.goals[:num_goals], 
+                self.input_targets[:num_goals],
                 self.targets[:num_goals],
                 self.workers[:num_workers],
                 self.control,
@@ -1062,6 +1093,7 @@ class ProgressiveMultiPromptAttack(object):
                 self.logfile,
                 self.managers,
                 self.test_goals,
+                self.test_input_targets,
                 self.test_targets,
                 self.test_workers,
                 **self.mpa_kwargs
@@ -1616,13 +1648,16 @@ def get_goals_and_targets(params):
     # hyperparameter to deicide the string length of target
     str_len = 20
     train_goals = getattr(params, 'goals', [])
+    train_input_targets = getattr(params,'input_targets',[])
     train_targets = getattr(params, 'targets', [])
     test_goals = getattr(params, 'test_goals', [])
+    test_input_targets = getattr(params,'test_input_targets',[])
     test_targets = getattr(params, 'test_targets', [])
     offset = getattr(params, 'data_offset', 0)
 
     if params.train_data:
         train_data = pd.read_csv(params.train_data)
+        train_input_targets = train_data['input_target'].tolist()[offset:offset+params.n_train_data]
         train_targets = train_data['target'].tolist()[offset:offset+params.n_train_data]
         # train_targets = [target[0:str_len] for target in train_data['target'].tolist()[offset:offset+params.n_train_data]] 
         if 'goal' in train_data.columns:
@@ -1631,6 +1666,7 @@ def get_goals_and_targets(params):
             train_goals = [""] * len(train_targets)
         if params.test_data and params.n_test_data > 0:
             test_data = pd.read_csv(params.test_data)
+            test_input_targets = test_data['input_target'].tolist()[offset:offset+params.n_test_data]
             test_targets = test_data['target'].tolist()[offset:offset+params.n_test_data]
             # test_targets = [target[0:str_len] for target in test_data['target'].tolist()[offset:offset+params.n_test_data]]
             if 'goal' in test_data.columns:
@@ -1638,6 +1674,7 @@ def get_goals_and_targets(params):
             else:
                 test_goals = [""] * len(test_targets)
         elif params.n_test_data > 0:
+            test_input_targets = train_data['input_target'].tolist()[offset+params.n_train_data:offset+params.n_train_data+params.n_test_data]
             test_targets = train_data['target'].tolist()[offset+params.n_train_data:offset+params.n_train_data+params.n_test_data]
             if 'goal' in train_data.columns:
                 test_goals = train_data['goal'].tolist()[offset+params.n_train_data:offset+params.n_train_data+params.n_test_data]
@@ -1648,8 +1685,4 @@ def get_goals_and_targets(params):
     assert len(test_goals) == len(test_targets)
     print('Loaded {} train goals'.format(len(train_goals)))
     print('Loaded {} test goals'.format(len(test_goals)))
-    # print('train_goals is:')
-    # print(train_goals)
-    # print('train_targets is: ')
-    # print(train_targets)
-    return train_goals, train_targets, test_goals, test_targets
+    return train_goals, train_input_targets, train_targets, test_goals, test_input_targets, test_targets
